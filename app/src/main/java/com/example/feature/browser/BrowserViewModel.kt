@@ -137,6 +137,31 @@ class BrowserViewModel(
         }
     }
 
+    /**
+     * Handles SPA (History.pushState) route changes on sites like YouTube and Instagram
+     * where onPageFinished does not fire again when opening a video, Short, or Reel.
+     */
+    fun onSpaUrlChanged(url: String, title: String?, canGoBack: Boolean, canGoForward: Boolean) {
+        if (!UrlValidator.isValidHttpUrl(url)) return
+        val previous = currentUrlFlow.value
+        currentUrlFlow.value = url
+        addressInputFlow.value = url
+        if (!title.isNullOrBlank()) {
+            pageTitleFlow.value = title
+        }
+        navCapabilitiesFlow.value = canGoBack to canGoForward
+        if (previous != url) {
+            detectedStreamsFlow.value = emptyList()
+            viewModelScope.launch {
+                browserDataRepository.recordVisit(
+                    url = url,
+                    title = title?.takeIf { it.isNotBlank() } ?: url,
+                    platform = UrlValidator.detectPlatform(url)
+                )
+            }
+        }
+    }
+
     fun onProgressChanged(progress: Int, canGoBack: Boolean, canGoForward: Boolean) {
         loadingStateFlow.value = (progress < 100) to progress
         navCapabilitiesFlow.value = canGoBack to canGoForward

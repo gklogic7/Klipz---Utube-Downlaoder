@@ -9,6 +9,8 @@ import com.example.domain.models.VideoContainer
 import com.example.downloader.engine.DownloadQueue
 import com.example.downloader.engine.TransferRateTracker
 import com.example.downloader.providers.DirectMediaProvider
+import com.example.downloader.providers.InstagramPublicFallback
+import com.example.downloader.providers.YouTubeInnerTubeFallback
 import com.example.downloader.ytdlp.YtDlpBridge
 import com.example.processing.ffmpeg.FfmpegProcessingEngine
 import com.example.processing.validation.OutputValidator
@@ -255,6 +257,163 @@ class KlipzCoreAndQueueUnitTest {
         )
         assertEquals("https://example.com/video", UrlValidator.normalizeUrl("example.com/video"))
         assertNull(UrlValidator.extractFirstUrl("Just plain notes with no link"))
+    }
+
+    @Test
+    fun `url canonicalizer normalizes youtube shorts and instagram share tracking links`() {
+        assertEquals("dQw4w9WgXcQ", UrlValidator.extractYouTubeVideoId("https://youtu.be/dQw4w9WgXcQ?si=share123"))
+        assertEquals("abcDEF12345", UrlValidator.extractYouTubeVideoId("https://youtube.com/shorts/abcDEF12345?feature=share"))
+        assertEquals("https://www.youtube.com/watch?v=abcDEF12345", UrlValidator.canonicalizeMediaUrl("https://m.youtube.com/shorts/abcDEF12345?si=xyz"))
+        assertNull(UrlValidator.extractYouTubeVideoId("https://m.youtube.com/"))
+
+        assertEquals("C9xYz12AbCd", UrlValidator.extractInstagramShortcode("https://www.instagram.com/reels/C9xYz12AbCd/?igsh=abc123&utm_source=ig_web"))
+        assertEquals("C9xYz12AbCd", UrlValidator.extractInstagramShortcode("https://www.instagram.com/reel/C9xYz12AbCd/"))
+        assertEquals("https://www.instagram.com/reel/C9xYz12AbCd/", UrlValidator.canonicalizeMediaUrl("https://www.instagram.com/reels/C9xYz12AbCd/?igsh=track99"))
+        assertNull(UrlValidator.extractInstagramShortcode("https://www.instagram.com/"))
+    }
+
+    @Test
+    fun `ytdlp option builder gates js-runtimes flag strictly to supported youtube runs`() {
+        val bridge = createPureJvmYtDlpBridge()
+
+        // Instagram must NEVER receive --js-runtimes
+        val igOpts = bridge.buildExtractOptions(
+            platform = Platform.INSTAGRAM,
+            extractorArgs = null,
+            jsRuntimesSupported = true,
+            quickJsPath = "/data/app/lib/arm64/libqjs.so"
+        )
+        assertFalse(igOpts.any { it.first == "--js-runtimes" })
+
+        // YouTube with unsupported yt-dlp version must NEVER receive --js-runtimes
+        val ytOldOpts = bridge.buildExtractOptions(
+            platform = Platform.YOUTUBE,
+            extractorArgs = null,
+            jsRuntimesSupported = false,
+            quickJsPath = "/data/app/lib/arm64/libqjs.so"
+        )
+        assertFalse(ytOldOpts.any { it.first == "--js-runtimes" })
+
+        // YouTube with supported yt-dlp + QuickJS path passes quickjs:<path>
+        val ytNewOpts = bridge.buildExtractOptions(
+            platform = Platform.YOUTUBE,
+            extractorArgs = null,
+            jsRuntimesSupported = true,
+            quickJsPath = "/data/app/lib/arm64/libqjs.so"
+        )
+        assertTrue(ytNewOpts.any { it.first == "--js-runtimes" && it.second == "quickjs:/data/app/lib/arm64/libqjs.so" })
+
+        // Lowercase CLI error parsing must extract clean reason instead of swallowing it
+        val mapped = bridge.mapErrorText("Usage: yt-dlp [OPTIONS] URL\nyt-dlp: error: no such option: --js-runtimes")
+        assertTrue(mapped.contains("no such option", ignoreCase = true))
+    }
+
+    @Test
+    fun `youtube innertube cookieless parser extracts full native resolutions and audio`() {
+        val fallback = YouTubeInnerTubeFallback(OkHttpClient())
+        val playerJson = """
+            {
+              "playabilityStatus": {"status": "OK"},
+              "videoDetails": {
+                "title": "Cookieless 4K Demo",
+                "author": "Creator",
+                "lengthSeconds": "180",
+                "thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/abc/hqdefault.jpg"}]}
+              },
+              "streamingData": {
+                "formats": [
+                  {
+                    "itag": 18,
+                    "url": "https://rr1.googlevideo.com/videoplayback?itag=18",
+                    "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+                    "width": 640,
+                    "height": 360,
+                    "fps": 30,
+                    "audioQuality": "AUDIO_QUALITY_LOW",
+                    "contentLength": "12000000"
+                  }
+                ],
+                "adaptiveFormats": [
+                  {
+                    "itag": 140,
+                    "url": "https://rr1.googlevideo.com/videoplayback?itag=140",
+                    "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                    "bitrate": 128000,
+                    "contentLength": "2880000"
+                  },
+                  {
+                    "itag": 137,
+                    "url": "https://rr1.googlevideo.com/videoplayback?itag=137",
+                    "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 30,
+                    "contentLength": "65000000"
+                  },
+                  {
+                    "itag": 313,
+                    "url": "https://rr1.googlevideo.com/videoplayback?itag=313",
+                    "mimeType": "video/webm; codecs=\"vp9\"",
+                    "width": 3840,
+                    "height": 2160,
+                    "fps": 60,
+                    "contentLength": "180000000"
+                  }
+                ]
+              }
+            }
+        """.trimIndent()
+
+        val result = fallback.parsePlayerJson("https://www.youtube.com/watch?v=abc", playerJson)
+        assertTrue(result is MediaInspectionResult.Success)
+        val info = (result as MediaInspectionResult.Success).mediaInfo
+        assertEquals("Cookieless 4K Demo", info.title)
+        assertTrue(info.formats.any { it.isAudioOnly && it.resolution == "Audio M4A" })
+        assertTrue(info.formats.any { it.resolution == "2160p60" && it.aspectRatioLabel == "16:9" })
+        assertTrue(info.formats.any { it.resolution == "1080p" && it.widthPx == 1920 && it.heightPx == 1080 })
+        assertTrue(info.formats.any { it.resolution == "360p" && !it.requiresFfmpegMerge })
+    }
+
+    @Test
+    fun `instagram cookieless embed and graphql parsers extract public reel videos`() {
+        val fallback = InstagramPublicFallback(OkHttpClient())
+        val embedHtml = """
+            <html><body>
+              <div class="Caption">Sunset time lapse reel</div>
+              <script>window.__additionalDataLoaded({"video_url":"https:\/\/scontent.cdninstagram.com\/v\/reel123.mp4?a=1\u0026b=2","display_url":"https:\/\/scontent.cdninstagram.com\/v\/thumb123.jpg"});</script>
+            </body></html>
+        """.trimIndent()
+
+        val embedResult = fallback.parseEmbedHtml("https://www.instagram.com/reel/C9xYz12AbCd/", embedHtml)
+        assertTrue(embedResult is MediaInspectionResult.Success)
+        val embedInfo = (embedResult as MediaInspectionResult.Success).mediaInfo
+        assertEquals(Platform.INSTAGRAM, embedInfo.platform)
+        assertTrue(embedInfo.formats.any { it.hasVideo && it.directUrl == "https://scontent.cdninstagram.com/v/reel123.mp4?a=1&b=2" })
+        assertFalse(embedInfo.formats.any { it.mimeType.startsWith("image/") })
+
+        val gqlJson = """
+            {
+              "data": {
+                "xdt_shortcode_media": {
+                  "video_url": "https://scontent.cdninstagram.com/v/hd_reel.mp4",
+                  "display_url": "https://scontent.cdninstagram.com/v/cover.jpg",
+                  "video_duration": 14.5,
+                  "dimensions": {"width": 1080, "height": 1920},
+                  "owner": {"username": "traveler"},
+                  "edge_media_to_caption": {"edges": [{"node": {"text": "Mountain hike reel"}}]}
+                }
+              }
+            }
+        """.trimIndent()
+
+        val gqlResult = fallback.parseGraphQlJson("https://www.instagram.com/reel/C9xYz12AbCd/", gqlJson)
+        assertTrue(gqlResult is MediaInspectionResult.Success)
+        val gqlInfo = (gqlResult as MediaInspectionResult.Success).mediaInfo
+        assertEquals("Mountain hike reel", gqlInfo.title)
+        val videoFmt = gqlInfo.formats.first()
+        assertEquals("1080p", videoFmt.resolution)
+        assertEquals("9:16", videoFmt.aspectRatioLabel)
+        assertEquals("https://scontent.cdninstagram.com/v/hd_reel.mp4", videoFmt.directUrl)
     }
 
     private fun createPureJvmYtDlpBridge(): YtDlpBridge {

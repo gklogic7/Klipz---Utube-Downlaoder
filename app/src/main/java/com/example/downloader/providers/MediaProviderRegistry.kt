@@ -32,21 +32,22 @@ class MediaProviderRegistry(
         if (!UrlValidator.isValidHttpUrl(normalized)) {
             return MediaInspectionResult.Error("Please enter a valid http:// or https:// media URL.")
         }
+        val canonical = UrlValidator.canonicalizeMediaUrl(normalized)
 
-        val provider = selectProvider(normalized)
-        var result = provider.getMediaInfo(normalized)
+        val provider = selectProvider(canonical)
+        var result = provider.getMediaInfo(canonical, processId)
 
         // If DirectMediaProvider didn't find video/audio on a generic webpage, try bundled yt-dlp extractor
         if (provider == fallbackDirectProvider &&
-            !UrlValidator.looksLikeDirectMediaUrl(normalized) &&
+            !UrlValidator.looksLikeDirectMediaUrl(canonical) &&
             ytDlpBridge != null
         ) {
             val hasPlayableAV = (result as? MediaInspectionResult.Success)
                 ?.mediaInfo?.formats?.any { it.hasVideo || it.isAudioOnly } == true
             if (!hasPlayableAV) {
                 val ytResult = ytDlpBridge.extractMetadata(
-                    url = normalized,
-                    platform = UrlValidator.detectPlatform(normalized),
+                    url = canonical,
+                    platform = UrlValidator.detectPlatform(canonical),
                     processId = processId
                 )
                 if (ytResult is MediaInspectionResult.Success && ytResult.mediaInfo.formats.isNotEmpty()) {

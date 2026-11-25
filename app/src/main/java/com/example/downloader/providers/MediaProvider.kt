@@ -14,6 +14,8 @@ interface MediaProvider {
 
     suspend fun getMediaInfo(url: String): MediaInspectionResult
 
+    suspend fun getMediaInfo(url: String, processId: String): MediaInspectionResult = getMediaInfo(url)
+
     suspend fun getFormats(media: MediaInfo): List<MediaFormat>
 
     suspend fun resolveAuthorizedDownload(media: MediaInfo, format: MediaFormat): Result<String>

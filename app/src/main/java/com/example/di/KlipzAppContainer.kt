@@ -22,7 +22,9 @@ import com.example.downloader.providers.DirectMediaProvider
 import com.example.downloader.providers.FacebookProvider
 import com.example.downloader.providers.GeneralYtDlpPlatformProvider
 import com.example.downloader.providers.InstagramProvider
+import com.example.downloader.providers.InstagramPublicFallback
 import com.example.downloader.providers.MediaProviderRegistry
+import com.example.downloader.providers.YouTubeInnerTubeFallback
 import com.example.downloader.providers.YouTubeProvider
 import com.example.downloader.ytdlp.YtDlpBridge
 import com.example.processing.ffmpeg.FfmpegProcessingEngine
@@ -49,11 +51,13 @@ class KlipzAppContainer(context: Context) {
 
     val ytDlpBridge: YtDlpBridge = YtDlpBridge(appContext)
     private val directMediaProvider = DirectMediaProvider(inspectionClient)
+    private val youTubeInnerTubeFallback = YouTubeInnerTubeFallback(inspectionClient)
+    private val instagramPublicFallback = InstagramPublicFallback(inspectionClient)
     val providerRegistry: MediaProviderRegistry = MediaProviderRegistry(
         providers = listOf(
-            YouTubeProvider(ytDlpBridge),
+            YouTubeProvider(ytDlpBridge, youTubeInnerTubeFallback),
             FacebookProvider(directMediaProvider, ytDlpBridge),
-            InstagramProvider(directMediaProvider, ytDlpBridge),
+            InstagramProvider(directMediaProvider, ytDlpBridge, instagramPublicFallback),
             GeneralYtDlpPlatformProvider(ytDlpBridge),
             directMediaProvider
         ),

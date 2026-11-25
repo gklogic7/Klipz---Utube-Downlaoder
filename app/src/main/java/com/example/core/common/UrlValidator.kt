@@ -9,6 +9,21 @@ object UrlValidator {
 
     private val urlRegex = Regex("""https?://[^\s<>"'()]+""", RegexOption.IGNORE_CASE)
 
+    private val youtubeWatchIdRegex = Regex("""[?&]v=([A-Za-z0-9_-]{11})""")
+    private val youtubePathIdRegex = Regex(
+        """(?:youtu\.be/|youtube\.com/(?:shorts|live|embed|v)/)([A-Za-z0-9_-]{11})""",
+        RegexOption.IGNORE_CASE
+    )
+    private val instagramShortcodeRegex = Regex(
+        """(?:instagram\.com|instagr\.am)/(?:[^/?#]+/)?(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val trackingParams = setOf(
+        "igsh", "igshid", "si", "feature", "pp", "fbclid", "gclid",
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"
+    )
+
     fun isValidHttpUrl(input: String?): Boolean {
         if (input.isNullOrBlank()) return false
         val trimmed = input.trim()
@@ -43,6 +58,58 @@ object UrlValidator {
             trimmed.contains(".") && !trimmed.contains(" ") -> "https://$trimmed"
             else -> trimmed
         }
+    }
+
+    /**
+     * Canonicalizes YouTube and Instagram links by stripping noisy share/tracking parameters
+     * (?si=, ?igsh=, etc.) and normalizing /shorts/, /reels/, and youtu.be/ variants.
+     */
+    fun canonicalizeMediaUrl(rawUrl: String): String {
+        val normalized = normalizeUrl(rawUrl)
+        if (!isValidHttpUrl(normalized)) return normalized
+
+        val platform = detectPlatform(normalized)
+        if (platform == Platform.YOUTUBE) {
+            val videoId = extractYouTubeVideoId(normalized)
+            if (videoId != null) {
+                return "https://www.youtube.com/watch?v=$videoId"
+            }
+        }
+        if (platform == Platform.INSTAGRAM) {
+            val shortcode = extractInstagramShortcode(normalized)
+            if (shortcode != null) {
+                val lower = normalized.lowercase(Locale.US)
+                val segment = if (lower.contains("/reel/") || lower.contains("/reels/")) "reel" else "p"
+                return "https://www.instagram.com/$segment/$shortcode/"
+            }
+        }
+
+        return stripTrackingQueryParams(normalized)
+    }
+
+    fun extractYouTubeVideoId(url: String): String? {
+        val trimmed = url.trim()
+        youtubeWatchIdRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it }
+        youtubePathIdRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it }
+        return null
+    }
+
+    fun extractInstagramShortcode(url: String): String? {
+        return instagramShortcodeRegex.find(url.trim())?.groupValues?.getOrNull(1)
+    }
+
+    private fun stripTrackingQueryParams(url: String): String {
+        return runCatching {
+            val uri = URI(url)
+            val rawQuery = uri.rawQuery ?: return url
+            val kept = rawQuery.split("&")
+                .filter { part ->
+                    val key = part.substringBefore("=").lowercase(Locale.US)
+                    key.isNotBlank() && key !in trackingParams
+                }
+            val rebuiltQuery = kept.takeIf { it.isNotEmpty() }?.joinToString("&")
+            URI(uri.scheme, uri.authority, uri.path, rebuiltQuery, null).toString()
+        }.getOrDefault(url)
     }
 
     fun extractFirstUrl(text: String?): String? {

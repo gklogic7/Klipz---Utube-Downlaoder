@@ -229,7 +229,9 @@ fun BrowserScreen(
                                 text = { Text("Analyze Current URL") },
                                 onClick = {
                                     showBrowserOptions = false
-                                    onAnalyzeCurrentPage(state.currentUrl, state.detectedStreams, state.pageTitle)
+                                    val liveUrl = webViewRef?.url?.takeIf { UrlValidator.isValidHttpUrl(it) } ?: state.currentUrl
+                                    val liveTitle = webViewRef?.title?.takeIf { it.isNotBlank() } ?: state.pageTitle
+                                    onAnalyzeCurrentPage(liveUrl, state.detectedStreams, liveTitle)
                                 }
                             )
                             DropdownMenuItem(
@@ -323,6 +325,19 @@ fun BrowserScreen(
                                 view?.evaluateJavascript(MEDIA_SNIFFER_JS, null)
                             }
 
+                            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                                super.doUpdateVisitedHistory(view, url, isReload)
+                                if (url != null) {
+                                    viewModel.onSpaUrlChanged(
+                                        url = url,
+                                        title = view?.title,
+                                        canGoBack = view?.canGoBack() ?: false,
+                                        canGoForward = view?.canGoForward() ?: false
+                                    )
+                                    view?.evaluateJavascript(MEDIA_SNIFFER_JS, null)
+                                }
+                            }
+
                             override fun shouldInterceptRequest(
                                 view: WebView?,
                                 request: WebResourceRequest?
@@ -391,10 +406,13 @@ fun BrowserScreen(
                     ) {
                         FloatingActionButton(
                             onClick = {
+                                webViewRef?.evaluateJavascript(MEDIA_SNIFFER_JS, null)
+                                val liveUrl = webViewRef?.url?.takeIf { UrlValidator.isValidHttpUrl(it) } ?: state.currentUrl
+                                val liveTitle = webViewRef?.title?.takeIf { it.isNotBlank() } ?: state.pageTitle
                                 onAnalyzeCurrentPage(
-                                    state.currentUrl,
+                                    liveUrl,
                                     state.detectedStreams,
-                                    state.pageTitle
+                                    liveTitle
                                 )
                             },
                             shape = CircleShape,

@@ -57,10 +57,13 @@ class DirectMediaProvider(
                 }
             }
 
-            // Fallback GET inspection (handles servers rejecting HEAD or HTML pages with embedded media)
+            // Fallback GET inspection (avoid Range header on HTML pages to prevent 416 or truncated video tags)
             val getReq = Request.Builder()
                 .url(url)
-                .header("Range", "bytes=0-131071") // Cap initial probe at 128 KB
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                )
                 .build()
 
             httpClient.newCall(getReq).execute().use { resp ->
@@ -84,7 +87,11 @@ class DirectMediaProvider(
                 }
 
                 if (contentType.contains("html") || contentType.contains("xml") || contentType.isEmpty()) {
-                    val htmlSnippet = resp.body?.string()?.take(131072).orEmpty()
+                    val htmlSnippet = resp.body?.charStream()?.use { reader ->
+                        val buffer = CharArray(512 * 1024)
+                        val count = reader.read(buffer)
+                        if (count > 0) String(buffer, 0, count) else ""
+                    }.orEmpty()
                     return@withContext inspectHtmlForAuthorizedMedia(url, htmlSnippet)
                 }
 

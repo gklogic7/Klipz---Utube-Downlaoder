@@ -159,6 +159,11 @@ data class MediaInfo(
     val supportsDirectDownload: Boolean = formats.any { !it.directUrl.isNullOrBlank() || it.isYtDlpManaged }
 )
 
+enum class YtDlpUpdateChannel(val displayName: String) {
+    STABLE("Stable"),
+    NIGHTLY("Nightly")
+}
+
 sealed interface MediaInspectionResult {
     data class Success(val mediaInfo: MediaInfo) : MediaInspectionResult
     data class Restricted(
@@ -166,7 +171,11 @@ sealed interface MediaInspectionResult {
         val reason: String,
         val guidance: String
     ) : MediaInspectionResult
-    data class Error(val message: String, val recoverable: Boolean = true) : MediaInspectionResult
+    data class Error(
+        val message: String,
+        val recoverable: Boolean = true,
+        val technicalDetails: String? = null
+    ) : MediaInspectionResult
 }
 
 data class DownloadTask(

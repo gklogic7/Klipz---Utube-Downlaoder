@@ -31,11 +31,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -79,7 +82,11 @@ sealed interface InspectionSheetState {
     data class Analyzing(val url: String) : InspectionSheetState
     data class PreviewReady(val mediaInfo: MediaInfo) : InspectionSheetState
     data class Restricted(val mediaInfo: MediaInfo?, val reason: String, val guidance: String) : InspectionSheetState
-    data class Failed(val url: String, val errorMessage: String) : InspectionSheetState
+    data class Failed(
+        val url: String,
+        val errorMessage: String,
+        val technicalDetails: String? = null
+    ) : InspectionSheetState
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -92,7 +99,8 @@ fun MediaInspectionModalHost(
     onRetryInspect: (String) -> Unit,
     onStartDownload: (MediaInfo, MediaFormat, VideoContainer, Boolean) -> Unit,
     onOpenTasksTab: () -> Unit,
-    onOpenInBrowser: (String) -> Unit
+    onOpenInBrowser: (String) -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     if (state is InspectionSheetState.Hidden) return
 
@@ -148,7 +156,9 @@ fun MediaInspectionModalHost(
                 InspectionErrorContent(
                     url = state.url,
                     message = state.errorMessage,
+                    technicalDetails = state.technicalDetails,
                     onRetry = { onRetryInspect(state.url) },
+                    onOpenSettings = onOpenSettings,
                     onDismiss = onDismiss
                 )
             }
@@ -731,13 +741,18 @@ private fun RestrictedSourceContent(
 private fun InspectionErrorContent(
     url: String,
     message: String,
+    technicalDetails: String?,
     onRetry: () -> Unit,
+    onOpenSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var showDetails by remember(url, technicalDetails) { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
@@ -769,6 +784,66 @@ private fun InspectionErrorContent(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+
+        if (!technicalDetails.isNullOrBlank()) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showDetails = !showDetails }
+                            .testTag("toggle_technical_details_button")
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Technical Details",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Icon(
+                            imageVector = if (showDetails) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (showDetails) "Hide technical details" else "Show technical details",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    if (showDetails) {
+                        Text(
+                            text = technicalDetails,
+                            style = KlipzMonoTextStyle,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        OutlinedButton(
+            onClick = onOpenSettings,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .testTag("error_update_engine_button"),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.SystemUpdateAlt,
+                contentDescription = "Update yt-dlp Engine",
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Update yt-dlp Engine in Settings")
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)

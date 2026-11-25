@@ -34,12 +34,14 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PrivacyTip
 import androidx.compose.material.icons.filled.Queue
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.filled.ViewCompact
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -70,6 +72,7 @@ import com.example.domain.models.LayoutDensity
 import com.example.domain.models.ProcessingEngine
 import com.example.domain.models.ThemeMode
 import com.example.domain.models.VideoContainer
+import com.example.domain.models.YtDlpUpdateChannel
 import com.example.feature.components.MonochromeCard
 import com.example.ui.theme.KlipzMonoTextStyle
 import com.example.ui.theme.LocalKlipzColors
@@ -99,6 +102,7 @@ fun SettingsScreen(
     var showLicensesDialog by remember { mutableStateOf(false) }
     var showPrivacyDialog by remember { mutableStateOf(false) }
     var showEngineInfoDialog by remember { mutableStateOf(false) }
+    var showUpdateEngineDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         viewModel.refreshStorage()
@@ -419,6 +423,72 @@ fun SettingsScreen(
                     testTag = "setting_engine_info"
                 )
                 SettingsDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !state.isUpdatingYtDlp) { showUpdateEngineDialog = true }
+                        .testTag("setting_update_ytdlp_engine")
+                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.SystemUpdateAlt,
+                            contentDescription = "Update yt-dlp Engine",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Update yt-dlp Engine",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = state.ytDlpUpdateMessage
+                                    ?: "Keep YouTube & Instagram extractors up to date",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = when {
+                                    state.ytDlpUpdateMessage?.startsWith("Update failed") == true ->
+                                        MaterialTheme.colorScheme.error
+                                    state.ytDlpUpdateMessage?.startsWith("Updated") == true ||
+                                        state.ytDlpUpdateMessage?.contains("up to date") == true ->
+                                        LocalKlipzColors.current.success
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    if (state.isUpdatingYtDlp) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = state.ytDlpStatus.ytDlpVersion ?: "Check",
+                                style = KlipzMonoTextStyle,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+                SettingsDivider()
                 SettingsValueRow(
                     icon = Icons.Filled.Description,
                     title = "Open-Source Licenses",
@@ -596,6 +666,56 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showPrivacyDialog = false }) { Text("Understood") }
+            }
+        )
+    }
+
+    if (showUpdateEngineDialog) {
+        AlertDialog(
+            onDismissRequest = { showUpdateEngineDialog = false },
+            title = { Text("Update yt-dlp Engine") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Choose an update channel to refresh the bundled yt-dlp extractor when YouTube or Instagram changes page formats.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Current version: ${state.ytDlpStatus.ytDlpVersion ?: "bundled"}",
+                        style = KlipzMonoTextStyle,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            showUpdateEngineDialog = false
+                            viewModel.updateYtDlp(YtDlpUpdateChannel.STABLE)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("update_ytdlp_stable_button"),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Update Stable (Recommended)")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            showUpdateEngineDialog = false
+                            viewModel.updateYtDlp(YtDlpUpdateChannel.NIGHTLY)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("update_ytdlp_nightly_button"),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Update Nightly (Latest Site Fixes)")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showUpdateEngineDialog = false }) { Text("Cancel") }
             }
         )
     }

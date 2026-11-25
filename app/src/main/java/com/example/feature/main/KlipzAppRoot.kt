@@ -303,6 +303,10 @@ fun KlipzAppRoot(
                 mainViewModel.dismissInspection()
                 browserViewModel.loadUrl(url)
                 currentDestination = KlipzDestination.BROWSER
+            },
+            onOpenSettings = {
+                mainViewModel.dismissInspection()
+                currentDestination = KlipzDestination.SETTINGS
             }
         )
 

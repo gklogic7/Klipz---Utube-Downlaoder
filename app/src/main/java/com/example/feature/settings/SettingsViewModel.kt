@@ -12,8 +12,10 @@ import com.example.domain.models.ProcessingEngine
 import com.example.domain.models.StorageInfo
 import com.example.domain.models.ThemeMode
 import com.example.domain.models.VideoContainer
+import com.example.domain.models.YtDlpUpdateChannel
 import com.example.downloader.ytdlp.YtDlpBridge
 import com.example.downloader.ytdlp.YtDlpEngineStatus
+import com.example.downloader.ytdlp.YtDlpUpdateResult
 import com.example.processing.ffmpeg.FfmpegCapabilities
 import com.example.processing.ffmpeg.FfmpegNativeBridge
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,7 +31,9 @@ data class SettingsUiState(
     val storageInfo: StorageInfo = StorageInfo(0L, 0L, 0L, 0L, 0L),
     val ffmpegCapabilities: FfmpegCapabilities = FfmpegNativeBridge.getCapabilities(),
     val ytDlpStatus: YtDlpEngineStatus = YtDlpEngineStatus(false, null, false, false, ""),
-    val cacheClearedBanner: String? = null
+    val cacheClearedBanner: String? = null,
+    val isUpdatingYtDlp: Boolean = false,
+    val ytDlpUpdateMessage: String? = null
 )
 
 class SettingsViewModel(
@@ -41,18 +45,32 @@ class SettingsViewModel(
 
     private val storageInfoFlow = MutableStateFlow(StorageInfo(0L, 0L, 0L, 0L, 0L))
     private val cacheBannerFlow = MutableStateFlow<String?>(null)
+    private val isUpdatingYtDlpFlow = MutableStateFlow(false)
+    private val ytDlpUpdateMessageFlow = MutableStateFlow<String?>(null)
+    private val ytDlpStatusRefreshTick = MutableStateFlow(0)
+
+    private val ytDlpUpdateStateFlow = combine(
+        isUpdatingYtDlpFlow,
+        ytDlpUpdateMessageFlow,
+        ytDlpStatusRefreshTick
+    ) { updating, message, _ ->
+        Triple(updating, message, ytDlpBridge.getStatus())
+    }
 
     val uiState: StateFlow<SettingsUiState> = combine(
         preferencesRepository.preferencesFlow,
         storageInfoFlow,
-        cacheBannerFlow
-    ) { prefs, storage, banner ->
+        cacheBannerFlow,
+        ytDlpUpdateStateFlow
+    ) { prefs, storage, banner, (updating, updateMsg, engineStatus) ->
         SettingsUiState(
             preferences = prefs,
             storageInfo = storage,
             ffmpegCapabilities = FfmpegNativeBridge.getCapabilities(),
-            ytDlpStatus = ytDlpBridge.getStatus(),
-            cacheClearedBanner = banner
+            ytDlpStatus = engineStatus,
+            cacheClearedBanner = banner,
+            isUpdatingYtDlp = updating,
+            ytDlpUpdateMessage = updateMsg
         )
     }.stateIn(
         scope = viewModelScope,
@@ -70,6 +88,7 @@ class SettingsViewModel(
                 libraryRepository.libraryFiles.first().sumOf { it.sizeBytes }
             }.getOrDefault(0L)
             storageInfoFlow.value = storageManager.getStorageInfo(libraryBytes)
+            ytDlpStatusRefreshTick.value = ytDlpStatusRefreshTick.value + 1
         }
     }
 
@@ -83,6 +102,25 @@ class SettingsViewModel(
 
     fun dismissBanner() {
         cacheBannerFlow.value = null
+    }
+
+    fun updateYtDlp(channel: YtDlpUpdateChannel) {
+        if (isUpdatingYtDlpFlow.value) return
+        viewModelScope.launch {
+            isUpdatingYtDlpFlow.value = true
+            ytDlpUpdateMessageFlow.value = "Checking ${channel.displayName} channel for yt-dlp updates…"
+            val result = ytDlpBridge.updateEngine(channel)
+            ytDlpUpdateMessageFlow.value = when (result) {
+                is YtDlpUpdateResult.Updated ->
+                    "Updated yt-dlp to ${result.version} (${channel.displayName})."
+                is YtDlpUpdateResult.AlreadyUpToDate ->
+                    "yt-dlp is already up to date (${result.version})."
+                is YtDlpUpdateResult.Failed ->
+                    "Update failed: ${result.reason}"
+            }
+            isUpdatingYtDlpFlow.value = false
+            ytDlpStatusRefreshTick.value = ytDlpStatusRefreshTick.value + 1
+        }
     }
 
     fun setDefaultVideoQuality(q: String) = launchPref { preferencesRepository.setDefaultVideoQuality(q) }

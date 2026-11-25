@@ -8,6 +8,8 @@ import com.example.domain.models.MediaInspectionResult
 import com.example.domain.models.MediaType
 import com.example.domain.models.Platform
 import com.example.domain.models.VideoContainer
+import com.example.domain.models.YtDlpUpdateChannel
+import com.squareup.moshi.Moshi
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -18,7 +20,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import com.squareup.moshi.Moshi
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -32,6 +33,12 @@ data class YtDlpEngineStatus(
     val ffmpegBundled: Boolean,
     val statusSummary: String
 )
+
+sealed interface YtDlpUpdateResult {
+    data class Updated(val version: String) : YtDlpUpdateResult
+    data class AlreadyUpToDate(val version: String) : YtDlpUpdateResult
+    data class Failed(val reason: String) : YtDlpUpdateResult
+}
 
 data class YtDlpProgressUpdate(
     val fraction: Float,
@@ -50,17 +57,19 @@ sealed interface YtDlpDownloadResult {
 /**
  * Embedded Python + yt-dlp + QuickJS/EJS + FFmpeg engine backed by youtubedl-android 0.18.1.
  *
- * Key guarantees:
- * - Bundled at build time inside the signed APK (no Termux required, no unprompted dynamic binary downloads).
+ * Key reliability guarantees:
+ * - Capability-gated flags: NEVER passes `--js-runtimes` blindly (which crashes older bundled yt-dlp
+ *   builds or non-YouTube extractors with `no such option: --js-runtimes`).
+ * - Cookieless multi-strategy YouTube extraction: tries safe default extraction first, then
+ *   automatically retries cookieless YouTube InnerTube player clients (`android_vr,android,ios,web_embedded`).
  * - Filters out DRM streams (`has_drm`) and non-media storyboard/image noise so video URLs always expose
  *   real Video and Audio formats at full native resolution & aspect ratio.
- * - Automatically pairs high-resolution adaptive video streams (2160p/1440p/1080p/720p/...) with best audio
- *   and muxes into MP4 or MKV via bundled FFmpeg without silent downscaling.
- * - Supports instant process cancellation via destroyProcessById(processId).
+ * - Supports manual user-triggered `yt-dlp` updates (`Stable` / `Nightly`) in Settings.
  */
 class YtDlpBridge(private val context: Context) {
 
     private val initMutex = Mutex()
+    private val updateMutex = Mutex()
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
@@ -71,6 +80,9 @@ class YtDlpBridge(private val context: Context) {
 
     @Volatile
     private var cachedVersion: String? = null
+
+    @Volatile
+    private var supportsJsRuntimesFlag: Boolean = false
 
     @Volatile
     private var lastInitError: String? = null
@@ -92,6 +104,7 @@ class YtDlpBridge(private val context: Context) {
                     FFmpeg.getInstance().init(context)
                     true
                 }.getOrDefault(false)
+                supportsJsRuntimesFlag = probeJsRuntimesSupport()
                 lastInitError = null
                 true
             } catch (t: Throwable) {
@@ -102,27 +115,65 @@ class YtDlpBridge(private val context: Context) {
         }
     }
 
+    /**
+     * User-triggered yt-dlp update (Stable or Nightly) from Settings.
+     * Refreshes cached version and re-probes CLI flag capabilities immediately afterward.
+     */
+    suspend fun updateEngine(channel: YtDlpUpdateChannel = YtDlpUpdateChannel.STABLE): YtDlpUpdateResult =
+        updateMutex.withLock {
+            withContext(Dispatchers.IO) {
+                if (!ensureInitialized()) {
+                    return@withContext YtDlpUpdateResult.Failed(
+                        "Embedded Python/yt-dlp failed to initialize: ${lastInitError ?: "unknown error"}"
+                    )
+                }
+                try {
+                    val dlChannel = when (channel) {
+                        YtDlpUpdateChannel.STABLE -> YoutubeDL.UpdateChannel._STABLE
+                        YtDlpUpdateChannel.NIGHTLY -> YoutubeDL.UpdateChannel._NIGHTLY
+                    }
+                    val status = YoutubeDL.getInstance().updateYoutubeDL(context, dlChannel)
+                    val versionAfter = runCatching { YoutubeDL.getInstance().version(context) }.getOrNull()
+                        ?: cachedVersion
+                        ?: "updated"
+                    cachedVersion = versionAfter
+                    supportsJsRuntimesFlag = probeJsRuntimesSupport()
+                    when (status) {
+                        YoutubeDL.UpdateStatus.DONE -> YtDlpUpdateResult.Updated(versionAfter)
+                        YoutubeDL.UpdateStatus.ALREADY_UP_TO_DATE -> YtDlpUpdateResult.AlreadyUpToDate(versionAfter)
+                        null -> YtDlpUpdateResult.AlreadyUpToDate(versionAfter)
+                    }
+                } catch (t: Throwable) {
+                    YtDlpUpdateResult.Failed(
+                        t.localizedMessage?.take(180) ?: "Could not update yt-dlp. Check internet connection."
+                    )
+                }
+            }
+        }
+
     fun isAvailable(): Boolean = initialized || isBundledLibraryPresent()
 
     fun getStatus(): YtDlpEngineStatus {
         val bundled = isBundledLibraryPresent()
-        val hasQjs = hasQuickJsBinary()
+        val hasQjs = findQuickJsPath() != null
+        val versionLabel = cachedVersion ?: if (bundled) "bundled (0.18.1)" else null
         val summary = when {
             initialized && ffmpegInitialized ->
-                "Embedded Python + yt-dlp ${cachedVersion ?: "active"} + QuickJS/EJS + FFmpeg ready"
+                "Embedded Python + yt-dlp ${versionLabel ?: "active"} + FFmpeg ready" +
+                    if (hasQjs && supportsJsRuntimesFlag) " (QuickJS/EJS active)" else ""
             initialized ->
-                "Embedded Python + yt-dlp ${cachedVersion ?: "active"} + QuickJS/EJS ready"
+                "Embedded Python + yt-dlp ${versionLabel ?: "active"} ready"
             bundled && lastInitError != null ->
                 "Embedded Python + yt-dlp bundled (init pending: $lastInitError)"
             bundled ->
-                "Embedded Python + yt-dlp + QuickJS/EJS + FFmpeg bundled (ready on demand)"
+                "Embedded Python + yt-dlp + FFmpeg bundled (ready on demand)"
             else ->
                 "Direct HTTP & WebView HTML5 extractor active"
         }
         return YtDlpEngineStatus(
             pythonRuntimeBundled = bundled,
-            ytDlpVersion = cachedVersion ?: if (bundled) "bundled (0.18.1)" else null,
-            jsRuntimeAvailable = hasQjs || bundled,
+            ytDlpVersion = versionLabel,
+            jsRuntimeAvailable = hasQjs,
             ffmpegBundled = ffmpegInitialized || bundled,
             statusSummary = summary
         )
@@ -142,44 +193,90 @@ class YtDlpBridge(private val context: Context) {
         val ready = ensureInitialized()
         if (!ready) {
             return@withContext MediaInspectionResult.Error(
-                "Embedded Python/yt-dlp runtime failed to initialize: ${lastInitError ?: "check ABI packaging"}."
+                message = "Embedded Python/yt-dlp runtime failed to initialize.",
+                technicalDetails = lastInitError ?: "Check APK ABI packaging (arm64-v8a / armeabi-v7a / x86_64)."
             )
         }
 
-        try {
-            val request = YoutubeDLRequest(url).apply {
-                addOption("--dump-single-json")
-                addOption("--no-playlist")
-                addOption("--no-warnings")
-                addOption("--no-check-certificates")
-                addOption("--skip-download")
-                // Prefer QuickJS (bundled libqjs.so) for YouTube EJS player challenges when available
-                addOption("--js-runtimes", "quickjs")
-            }
+        val canonicalUrl = UrlValidator.canonicalizeMediaUrl(url)
+        val strategies: List<Pair<String, String?>> = if (platform == Platform.YOUTUBE) {
+            listOf(
+                "default" to null,
+                "innertube_android_vr" to "youtube:player_client=android_vr,android,ios,web_embedded"
+            )
+        } else {
+            listOf("default" to null)
+        }
 
-            val response = YoutubeDL.getInstance().execute(request, processId, null)
-            val rawJson = extractJsonObject(response.out)
-            if (rawJson.isNullOrBlank()) {
-                return@withContext MediaInspectionResult.Error(
-                    mapErrorText(response.err.ifBlank { "No video or audio streams returned for ${UrlValidator.redactForLog(url)}." })
+        var lastError: MediaInspectionResult? = null
+        val diagnosticTrail = mutableListOf<String>()
+
+        for ((label, extractorArgs) in strategies) {
+            try {
+                val options = buildExtractOptions(
+                    platform = platform,
+                    extractorArgs = extractorArgs,
+                    jsRuntimesSupported = supportsJsRuntimesFlag,
+                    quickJsPath = findQuickJsPath()
                 )
-            }
-            parseYtDlpJson(rawJson, url, platform)
-        } catch (e: CancellationException) {
-            cancelProcess(processId)
-            throw e
-        } catch (e: Exception) {
-            val mapped = mapPythonException(e)
-            if (mapped.contains("DRM", ignoreCase = true) || mapped.contains("login", ignoreCase = true)) {
-                MediaInspectionResult.Restricted(
-                    mediaInfo = null,
-                    reason = mapped,
-                    guidance = "Klipz respects DRM and private-account protections. Public and user-authorized videos can be downloaded in full resolution."
-                )
-            } else {
-                MediaInspectionResult.Error(mapped)
+                val request = YoutubeDLRequest(canonicalUrl).apply {
+                    options.forEach { (flag, value) ->
+                        if (value == null) addOption(flag) else addOption(flag, value)
+                    }
+                }
+
+                val response = YoutubeDL.getInstance().execute(request, processId, null)
+                val rawJson = extractJsonObject(response.out)
+                if (!rawJson.isNullOrBlank()) {
+                    val parsed = parseYtDlpJson(rawJson, canonicalUrl, platform)
+                    if (parsed is MediaInspectionResult.Success) {
+                        return@withContext parsed
+                    }
+                    lastError = parsed
+                    diagnosticTrail.add("[$label] ${response.err.take(220).ifBlank { "No usable video/audio streams in JSON" }}")
+                } else {
+                    val errText = response.err.ifBlank { response.out }.trim()
+                    diagnosticTrail.add("[$label] ${errText.take(260)}")
+                    val mapped = mapErrorText(errText)
+                    lastError = if (isRestrictionError(errText)) {
+                        MediaInspectionResult.Restricted(
+                            mediaInfo = null,
+                            reason = mapped,
+                            guidance = "Klipz only accesses public, non-DRM media without login cookies."
+                        )
+                    } else {
+                        MediaInspectionResult.Error(
+                            message = mapped,
+                            technicalDetails = buildSafeDiagnostics(canonicalUrl, diagnosticTrail)
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                cancelProcess(processId)
+                throw e
+            } catch (e: Exception) {
+                val rawMsg = e.message.orEmpty()
+                diagnosticTrail.add("[$label] ${rawMsg.take(260)}")
+                val mapped = mapErrorText(rawMsg)
+                lastError = if (isRestrictionError(rawMsg)) {
+                    MediaInspectionResult.Restricted(
+                        mediaInfo = null,
+                        reason = mapped,
+                        guidance = "Klipz only accesses public, non-DRM media without login cookies."
+                    )
+                } else {
+                    MediaInspectionResult.Error(
+                        message = mapped,
+                        technicalDetails = buildSafeDiagnostics(canonicalUrl, diagnosticTrail)
+                    )
+                }
             }
         }
+
+        lastError ?: MediaInspectionResult.Error(
+            message = "Unable to extract video or audio streams from this URL.",
+            technicalDetails = buildSafeDiagnostics(canonicalUrl, diagnosticTrail)
+        )
     }
 
     suspend fun downloadWithYtDlp(
@@ -199,83 +296,134 @@ class YtDlpBridge(private val context: Context) {
             )
         }
 
+        val canonicalUrl = UrlValidator.canonicalizeMediaUrl(sourceUrl)
+        val platform = UrlValidator.detectPlatform(canonicalUrl)
         val jobDir = File(stagingDir, "ytdlp_$taskId").apply {
             if (exists()) deleteRecursively()
             mkdirs()
         }
 
-        try {
-            val outputTemplate = File(jobDir, "media.%(ext)s").absolutePath
-            val request = YoutubeDLRequest(sourceUrl).apply {
-                addOption("--no-playlist")
-                addOption("--no-mtime")
-                addOption("--newline")
-                addOption("--no-warnings")
-                addOption("--js-runtimes", "quickjs")
-                addOption("-o", outputTemplate)
+        val attempts: List<String?> = if (platform == Platform.YOUTUBE) {
+            listOf(null, "youtube:player_client=android_vr,android,ios,web_embedded")
+        } else {
+            listOf(null)
+        }
 
-                if (isAudioOnly) {
-                    addOption("-f", formatSelector.ifBlank { "bestaudio/best" })
-                    addOption("-x")
-                    val targetAudioExt = audioExtension.lowercase(Locale.US).let {
-                        if (it in setOf("mp3", "m4a", "opus")) it else "m4a"
+        var lastFailure = "Download failed."
+        for (extractorArgs in attempts) {
+            try {
+                // Clean partial artifacts between fallback attempts
+                jobDir.listFiles()?.forEach { it.deleteRecursively() }
+                val outputTemplate = File(jobDir, "media.%(ext)s").absolutePath
+                val request = YoutubeDLRequest(canonicalUrl).apply {
+                    addOption("--no-playlist")
+                    addOption("--no-mtime")
+                    addOption("--newline")
+                    addOption("--no-warnings")
+                    addOption("--no-check-certificates")
+                    addOption("--user-agent", DEFAULT_MOBILE_USER_AGENT)
+                    if (extractorArgs != null) {
+                        addOption("--extractor-args", extractorArgs)
+                    } else if (platform == Platform.YOUTUBE && supportsJsRuntimesFlag) {
+                        findQuickJsPath()?.let { qjs ->
+                            addOption("--js-runtimes", "quickjs:$qjs")
+                        }
                     }
-                    addOption("--audio-format", targetAudioExt)
-                    addOption("--audio-quality", "0")
-                } else {
-                    // Auto-merge selected full-resolution video + best audio into MP4 or MKV
-                    addOption("-f", formatSelector.ifBlank { "bestvideo+bestaudio/best" })
-                    addOption("--merge-output-format", outputContainer.extension)
-                }
-            }
+                    addOption("-o", outputTemplate)
 
-            var lastEmitted = 0L
-            YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
-                val now = System.currentTimeMillis()
-                if (now - lastEmitted >= 250L || progress >= 99f) {
-                    val parsedSpeed = parseSpeedBytesPerSec(line)
-                    val parsedTotal = parseTotalBytes(line)
-                    val fraction = (progress / 100f).coerceIn(0f, 1f)
-                    val downloaded = if (parsedTotal > 0L) (parsedTotal * fraction).toLong() else 0L
-                    lastEmitted = now
-                    kotlinx.coroutines.runBlocking {
-                        onProgress(
-                            YtDlpProgressUpdate(
-                                fraction = fraction,
-                                downloadedBytes = downloaded,
-                                totalBytes = parsedTotal,
-                                speedBytesPerSec = parsedSpeed,
-                                etaSeconds = etaInSeconds.takeIf { it > 0L }
+                    if (isAudioOnly) {
+                        addOption("-f", formatSelector.ifBlank { "bestaudio/best" })
+                        addOption("-x")
+                        val targetAudioExt = audioExtension.lowercase(Locale.US).let {
+                            if (it in setOf("mp3", "m4a", "opus")) it else "m4a"
+                        }
+                        addOption("--audio-format", targetAudioExt)
+                        addOption("--audio-quality", "0")
+                    } else {
+                        // Auto-merge selected full-resolution video + best audio into MP4 or MKV
+                        addOption("-f", formatSelector.ifBlank { "bestvideo+bestaudio/best" })
+                        addOption("--merge-output-format", outputContainer.extension)
+                    }
+                }
+
+                var lastEmitted = 0L
+                YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
+                    val now = System.currentTimeMillis()
+                    if (now - lastEmitted >= 250L || progress >= 99f) {
+                        val parsedSpeed = parseSpeedBytesPerSec(line)
+                        val parsedTotal = parseTotalBytes(line)
+                        val fraction = (progress / 100f).coerceIn(0f, 1f)
+                        val downloaded = if (parsedTotal > 0L) (parsedTotal * fraction).toLong() else 0L
+                        lastEmitted = now
+                        kotlinx.coroutines.runBlocking {
+                            onProgress(
+                                YtDlpProgressUpdate(
+                                    fraction = fraction,
+                                    downloadedBytes = downloaded,
+                                    totalBytes = parsedTotal,
+                                    speedBytesPerSec = parsedSpeed,
+                                    etaSeconds = etaInSeconds.takeIf { it > 0L }
+                                )
                             )
-                        )
+                        }
                     }
                 }
-            }
 
-            val outputFile = jobDir.listFiles()
-                ?.filter { it.isFile && it.length() > 0L && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") }
-                ?.maxByOrNull { it.length() }
-                ?: return@withContext YtDlpDownloadResult.Failed("Download finished but no merged media file was produced.")
-
-            val finalMime = mimeFromExtension(outputFile.extension, hasVideo = !isAudioOnly)
-            YtDlpDownloadResult.Completed(
-                outputFile = outputFile,
-                mimeType = finalMime,
-                finalBytes = outputFile.length()
-            )
-        } catch (e: CancellationException) {
-            cancelProcess(taskId)
-            jobDir.deleteRecursively()
-            YtDlpDownloadResult.Cancelled
-        } catch (e: Exception) {
-            val msg = e.message.orEmpty()
-            jobDir.deleteRecursively()
-            if (msg.contains("destroyed", ignoreCase = true) || msg.contains("interrupt", ignoreCase = true)) {
-                YtDlpDownloadResult.Cancelled
-            } else {
-                YtDlpDownloadResult.Failed(mapPythonException(e))
+                val outputFile = jobDir.listFiles()
+                    ?.filter { it.isFile && it.length() > 0L && !it.name.endsWith(".part") && !it.name.endsWith(".ytdl") }
+                    ?.maxByOrNull { it.length() }
+                if (outputFile != null) {
+                    val finalMime = mimeFromExtension(outputFile.extension, hasVideo = !isAudioOnly)
+                    return@withContext YtDlpDownloadResult.Completed(
+                        outputFile = outputFile,
+                        mimeType = finalMime,
+                        finalBytes = outputFile.length()
+                    )
+                }
+                lastFailure = "Download finished but no merged media file was produced."
+            } catch (e: CancellationException) {
+                cancelProcess(taskId)
+                jobDir.deleteRecursively()
+                return@withContext YtDlpDownloadResult.Cancelled
+            } catch (e: Exception) {
+                val msg = e.message.orEmpty()
+                if (msg.contains("destroyed", ignoreCase = true) || msg.contains("interrupt", ignoreCase = true)) {
+                    jobDir.deleteRecursively()
+                    return@withContext YtDlpDownloadResult.Cancelled
+                }
+                lastFailure = mapErrorText(msg)
             }
         }
+
+        jobDir.deleteRecursively()
+        YtDlpDownloadResult.Failed(lastFailure)
+    }
+
+    /**
+     * Builds safe, capability-gated CLI flags for yt-dlp metadata extraction.
+     * Never passes `--js-runtimes` on non-YouTube platforms or when the bundled yt-dlp does not support it.
+     */
+    internal fun buildExtractOptions(
+        platform: Platform,
+        extractorArgs: String?,
+        jsRuntimesSupported: Boolean,
+        quickJsPath: String?
+    ): List<Pair<String, String?>> {
+        val opts = mutableListOf<Pair<String, String?>>(
+            "--dump-single-json" to null,
+            "--no-playlist" to null,
+            "--no-warnings" to null,
+            "--no-check-certificates" to null,
+            "--skip-download" to null,
+            "--socket-timeout" to "20",
+            "--user-agent" to DEFAULT_MOBILE_USER_AGENT
+        )
+        if (!extractorArgs.isNullOrBlank()) {
+            opts.add("--extractor-args" to extractorArgs)
+        } else if (platform == Platform.YOUTUBE && jsRuntimesSupported && !quickJsPath.isNullOrBlank()) {
+            opts.add("--js-runtimes" to "quickjs:$quickJsPath")
+        }
+        return opts
     }
 
     /**
@@ -435,7 +583,6 @@ class YtDlpBridge(private val context: Context) {
         }
 
         // 2. Group video streams by full native resolution tier (preserving exact aspect ratio — e.g. 16:9, 9:16, 21:9)
-        // Use the shorter dimension for vertical Shorts (e.g. 1080x1920 -> 1080p) so resolution labels match YouTube!
         val videoStreams = rawFormats.filter { it.hasVideo }
         val groupedByTier = videoStreams.groupBy { stream ->
             computeResolutionTier(stream.width, stream.height)
@@ -444,7 +591,6 @@ class YtDlpBridge(private val context: Context) {
         groupedByTier.entries
             .sortedByDescending { it.key }
             .forEach { (tierPx, candidates) ->
-                // Prefer highest quality stream at this tier: prioritize AVC/H.264 or VP9/AV1 with highest fps & bitrate
                 val bestVideo = candidates.maxWithOrNull(
                     compareBy<RawYtDlpStream> { it.fps ?: 0 }
                         .thenBy { codecPriorityScore(it.vcodec) }
@@ -529,7 +675,6 @@ class YtDlpBridge(private val context: Context) {
         if (width <= 0 && height <= 0) return 0
         if (width <= 0) return height
         if (height <= 0) return width
-        // For vertical videos (e.g., 1080x1920 Shorts), YouTube classifies quality by the shorter side (1080p)
         val rawTier = minOf(width, height)
         val standardTiers = listOf(144, 240, 360, 480, 720, 1080, 1440, 2160, 4320)
         return standardTiers.minByOrNull { abs(it - rawTier) }
@@ -554,29 +699,59 @@ class YtDlpBridge(private val context: Context) {
         }
     }
 
-    internal fun mapPythonException(error: Throwable): String = mapErrorText(error.message.orEmpty())
-
     internal fun mapErrorText(raw: String): String {
         return when {
             raw.contains("Sign in", ignoreCase = true) ||
                 raw.contains("confirm you're not a bot", ignoreCase = true) ||
                 raw.contains("Private video", ignoreCase = true) ||
-                raw.contains("login", ignoreCase = true) ->
-                "This content requires login or is private. Klipz only accesses public or authorized media."
+                raw.contains("login required", ignoreCase = true) ||
+                raw.contains("empty media response", ignoreCase = true) ->
+                "This post or video requires login or is private. Klipz only extracts public links without cookies."
             raw.contains("DRM", ignoreCase = true) ->
                 "This stream is DRM-protected and cannot be downloaded."
-            raw.contains("429", ignoreCase = true) || raw.contains("rate", ignoreCase = true) ->
-                "The source platform rate-limited this request. Please retry shortly."
+            raw.contains("429", ignoreCase = true) || raw.contains("rate-limit", ignoreCase = true) ||
+                raw.contains("rate limit", ignoreCase = true) ->
+                "The platform temporarily rate-limited this request. Wait a moment and retry."
+            raw.contains("Video unavailable", ignoreCase = true) ->
+                "This video is unavailable, private, or has been removed."
             raw.contains("Unsupported URL", ignoreCase = true) ->
-                "This URL is not a supported video/audio source."
+                "Open a specific video or Reel URL (not a homepage feed) to inspect downloadable formats."
             raw.contains("timed out", ignoreCase = true) ->
                 "Connection timed out while analyzing the media URL."
-            else -> raw.lines().lastOrNull { it.contains("ERROR:", ignoreCase = true) }
-                ?.substringAfter("ERROR:", "")
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: "Unable to extract video or audio streams from this URL."
+            else -> {
+                val extracted = raw.lines()
+                    .lastOrNull { it.contains("ERROR:", ignoreCase = true) || it.contains("error:", ignoreCase = true) }
+                    ?.replace(Regex("""^.*?(?:ERROR|error):\s*"""), "")
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                extracted ?: "Unable to extract video or audio streams from this URL."
+            }
         }
+    }
+
+    private fun isRestrictionError(raw: String): Boolean {
+        return raw.contains("DRM", ignoreCase = true) ||
+            raw.contains("Private video", ignoreCase = true) ||
+            raw.contains("login required", ignoreCase = true)
+    }
+
+    private fun buildSafeDiagnostics(canonicalUrl: String, trail: List<String>): String {
+        val cleanedTrail = trail.filter { it.isNotBlank() }.joinToString("\n")
+        return buildString {
+            append("URL: ").append(UrlValidator.redactForLog(canonicalUrl))
+            append("\nyt-dlp: ").append(cachedVersion ?: "bundled")
+            if (cleanedTrail.isNotBlank()) {
+                append("\n").append(cleanedTrail.take(500))
+            }
+        }
+    }
+
+    private fun probeJsRuntimesSupport(): Boolean {
+        return runCatching {
+            val req = YoutubeDLRequest(emptyList()).apply { addOption("--help") }
+            val resp = YoutubeDL.getInstance().execute(req, "probe_help", null)
+            resp.out.contains("--js-runtimes", ignoreCase = true)
+        }.getOrDefault(false)
     }
 
     private fun extractJsonObject(rawOutput: String): String? {
@@ -593,9 +768,11 @@ class YtDlpBridge(private val context: Context) {
         }.getOrDefault(false)
     }
 
-    private fun hasQuickJsBinary(): Boolean {
-        val nativeDir = runCatching { File(context.applicationInfo.nativeLibraryDir) }.getOrNull() ?: return false
-        return nativeDir.listFiles()?.any { it.name.contains("qjs", ignoreCase = true) } == true
+    private fun findQuickJsPath(): String? {
+        val nativeDir = runCatching { File(context.applicationInfo.nativeLibraryDir) }.getOrNull() ?: return null
+        return nativeDir.listFiles()
+            ?.firstOrNull { it.isFile && it.name.contains("qjs", ignoreCase = true) }
+            ?.absolutePath
     }
 
     private fun estimateSizeFromBitrate(bitrateKbps: Double?, durationSec: Double): Long? {
@@ -726,4 +903,9 @@ class YtDlpBridge(private val context: Context) {
         val bitrateKbps: Int?,
         val directUrl: String?
     )
+
+    companion object {
+        private const val DEFAULT_MOBILE_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    }
 }

@@ -89,7 +89,8 @@ class MainViewModel(
                     )
                     is MediaInspectionResult.Error -> InspectionSheetState.Failed(
                         url = url,
-                        errorMessage = result.message
+                        errorMessage = result.message,
+                        technicalDetails = result.technicalDetails
                     )
                 }
             } catch (_: CancellationException) {
