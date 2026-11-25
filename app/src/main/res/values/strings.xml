@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Klipz</string>
+    <string name="app_tagline">Media Utility &amp; Manager</string>
+
+    <!-- Navigation -->
+    <string name="nav_home">Home</string>
+    <string name="nav_browser">Browser</string>
+    <string name="nav_tasks">Tasks</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Home -->
+    <string name="home_search_placeholder">Paste media URL or search…</string>
+    <string name="home_paste">Paste</string>
+    <string name="home_inspect">Inspect</string>
+    <string name="home_clipboard_detected">Link found on clipboard</string>
+    <string name="home_clipboard_inspect">Inspect Link</string>
+    <string name="home_clipboard_dismiss">Dismiss</string>
+    <string name="home_web_history">Web History</string>
+    <string name="home_bookmarks">Bookmarks</string>
+    <string name="home_active_downloads_plural">You Have %1$d Active Downloads</string>
+    <string name="home_active_downloads_single">You Have 1 Active Download</string>
+    <string name="home_no_active_downloads">Download Queue Idle</string>
+    <string name="home_recent_downloads">Recent Downloads</string>
+    <string name="home_view_all">View All</string>
+    <string name="home_empty_recent_title">No downloads yet</string>
+    <string name="home_empty_recent_body">Paste a direct media URL above or browse in the Browser tab to inspect and save authorized media.</string>
+
+    <!-- Browser & Preview -->
+    <string name="browser_url_placeholder">Enter URL or search web…</string>
+    <string name="browser_analyzing">Analyzing URL, Please Wait…</string>
+    <string name="browser_cancel">Cancel</string>
+    <string name="browser_grab_media">Analyze Page</string>
+    <string name="preview_download_now">Download Now</string>
+    <string name="preview_monitor_tasks">Monitor progress in the Tasks tab</string>
+    <string name="preview_private_folder">Save to Private App Folder</string>
+    <string name="preview_public_folder">Save to Downloads/Klipz</string>
+    <string name="preview_select_quality">Available Formats</string>
+    <string name="preview_no_formats_title">No Direct Downloadable Streams Found</string>
+
+    <!-- Tasks (Downloads + Library) -->
+    <string name="tasks_mode_downloads">Downloads</string>
+    <string name="tasks_mode_library">Library</string>
+    <string name="downloads_tab_active">Active</string>
+    <string name="downloads_tab_completed">Completed</string>
+    <string name="downloads_tab_failed">Failed</string>
+    <string name="library_filter_videos">Videos</string>
+    <string name="library_filter_images">Images</string>
+    <string name="library_filter_audio">Audio</string>
+    <string name="library_search_hint">Search downloaded files…</string>
+
+    <!-- Actions -->
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_remove">Remove</string>
+    <string name="action_open">Open</string>
+    <string name="action_share">Share</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_process">Process</string>
+    <string name="action_info">File Info</string>
+
+    <!-- Settings -->
+    <string name="settings_download_section">Download Settings</string>
+    <string name="settings_processing_section">Processing Settings</string>
+    <string name="settings_browser_section">Browser Settings</string>
+    <string name="settings_appearance_section">Appearance</string>
+    <string name="settings_storage_section">Storage</string>
+    <string name="settings_about_section">About</string>
+    <string name="settings_clear_cache">Clear Temporary Cache</string>
+    <string name="settings_licenses">Open-Source Licenses</string>
+    <string name="settings_privacy">Privacy Information</string>
+    <string name="settings_engines">Processing &amp; Extraction Engines</string>
+
+    <!-- Notifications -->
+    <string name="notif_channel_downloads_name">Downloads</string>
+    <string name="notif_channel_downloads_desc">Active and completed media transfer progress</string>
+    <string name="notif_channel_processing_name">Media Processing</string>
+    <string name="notif_channel_processing_desc">Local Media3 and FFmpeg conversion progress</string>
+
+    <!-- Errors -->
+    <string name="error_invalid_url">Please enter a valid http:// or https:// media URL.</string>
+    <string name="error_wifi_only">Wi-Fi only mode is enabled. Connect to Wi-Fi or adjust Download Settings.</string>
+    <string name="error_insufficient_storage">Insufficient storage space available for this download.</string>
+</resources>

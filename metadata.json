@@ -1,0 +1,6 @@
+{
+  "name": "Klipz",
+  "description": "Native Android media downloader, browser grabber, Media3/FFmpeg processor, and local MediaStore library manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
